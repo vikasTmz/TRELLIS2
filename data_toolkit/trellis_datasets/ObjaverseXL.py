@@ -98,12 +98,14 @@ def foreach_instance(
                 try:
                     if "local_path" in metadatum:
                         local_path = metadatum["local_path"]
+                        file = os.path.join(output_dir, local_path)
                     else:
                         local_path = None
+                        file = None
 
                     sha256 = metadatum["sha256"]
 
-                    record = func(None, metadatum=metadatum)
+                    record = func(file, metadatum=metadatum)
                     if record is not None:
                         records.append(record)
                     pbar.update()

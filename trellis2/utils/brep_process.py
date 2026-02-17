@@ -566,16 +566,16 @@ def process_and_export_split_files(input_path, output_path):
         points = sample_and_export_boundary_points(
             boundary_segments,
             output_path + "__boundarypointsmore.ply",
-            points_per_unit=70,
-            min_dist=0.01,
+            points_per_unit=200,
+            min_dist=0.001,
             shuffle_filter=True,
             seed=0,
         )
 
         mesh = points_to_metaball_mesh(
             points,
-            radius=0.01,
-            smooth_k=15,  # or try values like 10, 20, 40
+            radius=0.0001,
+            smooth_k=25,  # or try values like 10, 20, 40
             voxel_size=0.2,
             padding=0.5,
         )
