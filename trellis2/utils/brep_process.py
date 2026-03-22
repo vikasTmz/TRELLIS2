@@ -574,9 +574,9 @@ def process_and_export_split_files(input_path, output_path):
 
         mesh = points_to_metaball_mesh(
             points,
-            radius=0.0001,
-            smooth_k=25,  # or try values like 10, 20, 40
-            voxel_size=0.2,
+            radius=0.00001,
+            smooth_k=50,  # or try values like 10, 20, 40
+            voxel_size=0.04,
             padding=0.5,
         )
 

@@ -15,6 +15,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("hashmap_insert_3d_idx_as_val_cuda", &hashmap_insert_3d_idx_as_val_cuda);
     // Convert functions
     m.def("mesh_to_flexible_dual_grid_cpu", &mesh_to_flexible_dual_grid_cpu, py::call_guard<py::gil_scoped_release>());
+    m.def("lines_to_flexible_dual_grid_cpu", &lines_to_flexible_dual_grid_cpu, py::call_guard<py::gil_scoped_release>());
     m.def("textured_mesh_to_volumetric_attr_cpu", &textured_mesh_to_volumetric_attr_cpu, py::call_guard<py::gil_scoped_release>());
     // Serialization functions
     m.def("z_order_encode_cpu", &z_order_encode_cpu, py::call_guard<py::gil_scoped_release>());

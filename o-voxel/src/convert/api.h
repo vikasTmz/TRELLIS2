@@ -38,6 +38,17 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     bool timing
 );
 
+/**
+ * Extract flexible dual grid from line segments.
+ */
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> lines_to_flexible_dual_grid_cpu(
+    const torch::Tensor& vertices,
+    const torch::Tensor& lines,  // Shape (L, 2)
+    const torch::Tensor& voxel_size,
+    const torch::Tensor& grid_range,
+    float regularization_weight,
+    bool timing
+);
 
 /**
  * Voxelizes a triangle mesh with PBR materials

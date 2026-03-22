@@ -3,8 +3,11 @@
 #include <vector>
 #include <cmath>
 #include <ctime>
+#include <tuple>
 
 #include "api.h"
+
+
 
 
 constexpr size_t kInvalidIndex = std::numeric_limits<size_t>::max();
@@ -171,6 +174,108 @@ void intersect_qef(
     }
 }
 
+void intersect_lines_qef(
+    const Eigen::Vector3f& voxel_size,
+    const Eigen::Vector3i& grid_min,
+    const Eigen::Vector3i& grid_max,
+    const std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>>& line_segments,
+    std::unordered_map<VoxelCoord, size_t>& hash_table,
+    std::vector<int3>& voxels,
+    std::vector<Eigen::Vector3f>& means,
+    std::vector<float>& cnt,
+    std::vector<bool3>& intersected,
+    std::vector<Eigen::Matrix4f>& qefs
+) {
+    for (size_t l = 0; l < line_segments.size(); ++l) {
+        const Eigen::Vector3f& v0 = line_segments[l].first;
+        const Eigen::Vector3f& v1 = line_segments[l].second;
+
+        Eigen::Vector3f dir = v1 - v0;
+        float len = dir.norm();
+        if (len < 1e-6f) continue; // Skip degenerate lines
+        Eigen::Vector3f d = dir / len;
+
+        // 1. Compute QEF matrix Q for the line
+        // A = I - d * d^T
+        Eigen::Matrix3f A = Eigen::Matrix3f::Identity() - d * d.transpose();
+        Eigen::Vector3f b_qef = -A * v0;
+        float c_qef = v0.dot(A * v0);
+
+        Eigen::Matrix4f Q = Eigen::Matrix4f::Zero();
+        Q.topLeftCorner<3, 3>() = A;
+        Q.block<3, 1>(0, 3) = b_qef;
+        Q.block<1, 3>(3, 0) = b_qef.transpose();
+        Q(3, 3) = c_qef;
+
+        // 2. Find intersections with voxel grid faces
+        // We intersect the line segment with all axis-aligned planes it crosses
+        for (int ax = 0; ax < 3; ++ax) {
+            if (std::abs(dir[ax]) < 1e-6f) continue; // Parallel to the plane, no face intersection
+
+            int ax1 = (ax + 1) % 3;
+            int ax2 = (ax + 2) % 3;
+
+            // Find the grid plane bounds the segment crosses. 
+            // We use a small epsilon to avoid double counting at exact vertices shared by polylines.
+            int start_idx = std::ceil(std::min(v0[ax], v1[ax]) / voxel_size[ax] + 1e-5f);
+            int end_idx   = std::floor(std::max(v0[ax], v1[ax]) / voxel_size[ax] - 1e-5f);
+
+            for (int i = start_idx; i <= end_idx; ++i) {
+                float p_val = i * voxel_size[ax];
+                float t = (p_val - v0[ax]) / dir[ax];
+
+                if (t < 0.0f || t > 1.0f) continue;
+
+                Eigen::Vector3f intersect = v0 + t * dir;
+
+                // Find the other two coordinates in grid space
+                int idx1 = std::floor(intersect[ax1] / voxel_size[ax1]);
+                int idx2 = std::floor(intersect[ax2] / voxel_size[ax2]);
+
+                // Ensure intersection is within the grid bounds
+                if (idx1 < grid_min[ax1] || idx1 >= grid_max[ax1] ||
+                    idx2 < grid_min[ax2] || idx2 >= grid_max[ax2]) {
+                    continue;
+                }
+
+                // A face intersection is shared by exactly two voxels along 'ax'
+                for (int d_ax = -1; d_ax <= 0; ++d_ax) {
+                    int voxel_ax_idx = i + d_ax;
+                    if (voxel_ax_idx < grid_min[ax] || voxel_ax_idx >= grid_max[ax]) continue;
+
+                    VoxelCoord coord;
+                    coord[ax] = voxel_ax_idx;
+                    coord[ax1] = idx1;
+                    coord[ax2] = idx2;
+
+                    auto kv = hash_table.find(coord);
+                    size_t v_idx;
+
+                    if (kv == hash_table.end()) {
+                        v_idx = voxels.size();
+                        hash_table[coord] = v_idx;
+                        voxels.push_back({coord.x, coord.y, coord.z});
+                        means.push_back(intersect);
+                        cnt.push_back(1.0f);
+                        intersected.push_back({false, false, false});
+                        qefs.push_back(Q);
+                    } else {
+                        v_idx = kv->second;
+                        means[v_idx] += intersect;
+                        cnt[v_idx] += 1.0f;
+                        qefs[v_idx] += Q;
+                    }
+
+                    // Set the intersection flag. 
+                    // If d_ax == 0, this grid plane is the minimum/lower face of the voxel.
+                    if (d_ax == 0) {
+                        intersected[v_idx][ax] = true;
+                    }
+                }
+            }
+        }
+    }
+}
 
 void face_qef(
     const Eigen::Vector3f& voxel_size,
@@ -773,3 +878,265 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     );
 }
 
+
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> lines_to_flexible_dual_grid_cpu(
+    const torch::Tensor& vertices,
+    const torch::Tensor& lines,  // Shape (L, 2)
+    const torch::Tensor& voxel_size,
+    const torch::Tensor& grid_range,
+    float regularization_weight,
+    bool timing
+) {
+    const int L = lines.size(0);
+    const float* v_ptr = vertices.data_ptr<float>();
+    const int* l_ptr = lines.data_ptr<int>();
+    const float* voxel_size_ptr = voxel_size.data_ptr<float>();
+    const int* grid_range_ptr = grid_range.data_ptr<int>();
+    
+    clock_t start, end;
+    std::unordered_map<VoxelCoord, size_t> hash_table;
+    std::vector<int3> voxels; 
+    std::vector<Eigen::Vector3f> means; 
+    std::vector<float> cnt; 
+    std::vector<bool3> intersected; // Indicates if X, Y, or Z voxel faces are intersected
+    std::vector<Eigen::Matrix4f> qefs; 
+
+    Eigen::Vector3f e_voxel_size(voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]);
+    Eigen::Vector3i e_grid_min(grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]);
+    Eigen::Vector3i e_grid_max(grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]);
+    
+    // 1. Intersect Line Segments with Voxel Faces
+    start = clock();
+    std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> line_segments;
+    line_segments.reserve(L);
+    for (int l = 0; l < L; ++l) {
+        int v0_idx = l_ptr[l * 2 + 0];
+        int v1_idx = l_ptr[l * 2 + 1];
+        line_segments.push_back({
+            Eigen::Vector3f(v_ptr[v0_idx * 3 + 0], v_ptr[v0_idx * 3 + 1], v_ptr[v0_idx * 3 + 2]),
+            Eigen::Vector3f(v_ptr[v1_idx * 3 + 0], v_ptr[v1_idx * 3 + 1], v_ptr[v1_idx * 3 + 2])
+        });
+    }
+    
+    intersect_lines_qef(e_voxel_size, e_grid_min, e_grid_max, line_segments, 
+                        hash_table, voxels, means, cnt, intersected, qefs);
+    
+    end = clock();
+    if (timing) std::cout << "Intersect Lines QEF computation took " << double(end - start) / CLOCKS_PER_SEC << " seconds." << std::endl;
+
+    // 2. Solve the QEF system (Identical to mesh implementation!)
+    start = clock();
+    std::vector<float3> dual_vertices(voxels.size());
+    for (int i = 0; i < voxels.size(); ++i) {
+        int3 coord = voxels[i];
+        Eigen::Matrix4f Q = qefs[i];
+        float min_corner[3] = {
+            coord.x * e_voxel_size.x(),
+            coord.y * e_voxel_size.y(),
+            coord.z * e_voxel_size.z()
+        };
+        float max_corner[3] = {
+            (coord.x + 1) * e_voxel_size.x(),
+            (coord.y + 1) * e_voxel_size.y(),
+            (coord.z + 1) * e_voxel_size.z()
+        };
+
+        // Add regularization term
+        if (regularization_weight > 0.0f) {
+            Eigen::Vector3f p = means[i] / cnt[i];
+
+            // Construct the QEF matrix for this vertex
+            Eigen::Matrix4f Qreg = Eigen::Matrix4f::Zero();
+            Qreg.topLeftCorner<3,3>() = Eigen::Matrix3f::Identity();
+            Qreg.block<3,1>(0,3)    = -p;
+            Qreg.block<1,3>(3,0)    = -p.transpose();
+            Qreg(3,3)               = p.dot(p);
+
+            Q += regularization_weight * cnt[i] * Qreg; // Scale by regularization weight
+        }
+
+        // Solve unconstrained
+        Eigen::Matrix3f A = Q.topLeftCorner<3, 3>();
+        Eigen::Vector3f b = -Q.block<3, 1>(0, 3);
+        Eigen::Vector3f v_new = A.colPivHouseholderQr().solve(b);
+
+        if (!(
+            v_new.x() >= min_corner[0] && v_new.x() <= max_corner[0] &&
+            v_new.y() >= min_corner[1] && v_new.y() <= max_corner[1] &&
+            v_new.z() >= min_corner[2] && v_new.z() <= max_corner[2]
+        )) {
+            // Starting enumeration of constraints
+            float best = std::numeric_limits<float>::infinity();
+
+            // Solve single-constraint
+            auto solve_single_constraint = [&](int fixed_axis) {
+                int ax1 = (fixed_axis + 1) % 3;
+                int ax2 = (fixed_axis + 2) % 3;
+
+                Eigen::Matrix2f A;
+                Eigen::Matrix2f B;
+                Eigen::Vector2f q, b, x;
+
+                A << Q(ax1, ax1), Q(ax1, ax2),
+                     Q(ax2, ax1), Q(ax2, ax2);
+                B << Q(ax1, fixed_axis), Q(ax1, 3),
+                     Q(ax2, fixed_axis), Q(ax2, 3);
+                auto Asol = A.colPivHouseholderQr();
+
+                // if lower bound
+                q << min_corner[fixed_axis], 1;
+                b = -B * q;
+                x = Asol.solve(b);
+                if (
+                    x.x() >= min_corner[ax1] && x.x() <= max_corner[ax1] &&
+                    x.y() >= min_corner[ax2] && x.y() <= max_corner[ax2]
+                ) {
+                    Eigen::Vector4f p;
+                    p[fixed_axis] = min_corner[fixed_axis];
+                    p[ax1] = x.x();
+                    p[ax2] = x.y();
+                    p[3] = 1.0f;
+                    float err = p.transpose() * Q * p;
+                    if (err < best) {
+                        best = err;
+                        v_new << p[0], p[1], p[2];
+                    }
+                }
+
+                // if upper bound
+                q << max_corner[fixed_axis], 1;
+                b = -B * q;
+                x = Asol.solve(b);
+                if (
+                    x.x() >= min_corner[ax1] && x.x() <= max_corner[ax1] &&
+                    x.y() >= min_corner[ax2] && x.y() <= max_corner[ax2]
+                ) {
+                    Eigen::Vector4f p;
+                    p[fixed_axis] = max_corner[fixed_axis];
+                    p[ax1] = x.x();
+                    p[ax2] = x.y();
+                    p[3] = 1.0f;
+                    float err = p.transpose() * Q * p;
+                    if (err < best) {
+                        best = err;
+                        v_new << p[0], p[1], p[2];
+                    }
+                }
+            };
+            solve_single_constraint(0); // fix x
+            solve_single_constraint(1); // fix y
+            solve_single_constraint(2); // fix z
+
+            // Solve two-constraint
+            auto solve_two_constraint = [&](int free_axis) {
+                int ax1 = (free_axis + 1) % 3;
+                int ax2 = (free_axis + 2) % 3;
+
+                float a, x;
+                Eigen::Vector3f b, q;
+
+                a = Q(free_axis, free_axis);
+                b << Q(free_axis, ax1), Q(free_axis, ax2), Q(free_axis, 3);
+
+                // if lower-lower bound
+                q << min_corner[ax1], min_corner[ax2], 1;
+                x = -(b.dot(q)) / a;
+                if (x >= min_corner[free_axis] && x <= max_corner[free_axis]) {
+                    Eigen::Vector4f p;
+                    p[free_axis] = x;
+                    p[ax1] = min_corner[ax1];
+                    p[ax2] = min_corner[ax2];
+                    p[3] = 1.0f;
+                    float err = p.transpose() * Q * p;
+                    if (err < best) {
+                        best = err;
+                        v_new << p[0], p[1], p[2];
+                    }
+                }
+
+                // if lower-upper bound
+                q << min_corner[ax1], max_corner[ax2], 1;
+                x = -(b.dot(q)) / a;
+                if (x >= min_corner[free_axis] && x <= max_corner[free_axis]) {
+                    Eigen::Vector4f p;
+                    p[free_axis] = x;
+                    p[ax1] = min_corner[ax1];
+                    p[ax2] = max_corner[ax2];
+                    p[3] = 1.0f;
+                    float err = p.transpose() * Q * p;
+                    if (err < best) {
+                        best = err;
+                        v_new << p[0], p[1], p[2];
+                    }
+                }
+
+                // if upper-lower bound
+                q << max_corner[ax1], min_corner[ax2], 1;
+                x = -(b.dot(q)) / a;
+                if (x >= min_corner[free_axis] && x <= max_corner[free_axis]) {
+                    Eigen::Vector4f p;
+                    p[free_axis] = x;
+                    p[ax1] = max_corner[ax1];
+                    p[ax2] = min_corner[ax2];
+                    p[3] = 1.0f;
+                    float err = p.transpose() * Q * p;
+                    if (err < best) {
+                        best = err;
+                        v_new << p[0], p[1], p[2];
+                    }
+                }
+
+                // if upper-upper bound
+                q << max_corner[ax1], max_corner[ax2], 1;
+                x = -(b.dot(q)) / a;
+                if (x >= min_corner[free_axis] && x <= max_corner[free_axis]) {
+                    Eigen::Vector4f p;
+                    p[free_axis] = x;
+                    p[ax1] = max_corner[ax1];
+                    p[ax2] = max_corner[ax2];
+                    p[3] = 1.0f;
+                    float err = p.transpose() * Q * p;
+                    if (err < best) {
+                        best = err;
+                        v_new << p[0], p[1], p[2];
+                    }
+                }
+            };
+            solve_two_constraint(0); // free x
+            solve_two_constraint(1); // free y
+            solve_two_constraint(2); // free z
+
+            // Solve three-constraint
+            for (int x_constraint = 0; x_constraint < 2; ++x_constraint) {
+                for (int y_constraint = 0; y_constraint < 2; ++y_constraint) {
+                    for (int z_constraint = 0; z_constraint < 2; ++z_constraint) {
+                        Eigen::Vector4f p;
+                        p[0] = x_constraint ? min_corner[0] : max_corner[0];
+                        p[1] = y_constraint ? min_corner[1] : max_corner[1];
+                        p[2] = z_constraint ? min_corner[2] : max_corner[2];
+                        p[3] = 1.0f;
+
+                        float err = p.transpose() * Q * p;
+                        if (err < best) {
+                            best = err;
+                            v_new << p[0], p[1], p[2];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Store the dual vertex and voxel grid coordinates
+        dual_vertices[i] = float3{v_new.x(), v_new.y(), v_new.z()};
+        
+    }
+    end = clock();
+    if (timing) std::cout << "Dual vertices computation took " << double(end - start) / CLOCKS_PER_SEC << " seconds." << std::endl;
+
+    return std::make_tuple(
+        torch::from_blob(voxels.data(), {int(voxels.size()), 3}, torch::kInt32).clone(),
+        torch::from_blob(dual_vertices.data(), {int(dual_vertices.size()), 3}, torch::kFloat32).clone(),
+        torch::from_blob(intersected.data(), {int(intersected.size()), 3}, torch::kBool).clone()
+    );
+}
