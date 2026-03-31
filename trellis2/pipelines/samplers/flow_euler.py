@@ -15,6 +15,7 @@ class FlowEulerSampler(Sampler):
     Args:
         sigma_min: The minimum scale of noise in flow.
     """
+
     def __init__(
         self,
         sigma_min: float,
@@ -32,17 +33,25 @@ class FlowEulerSampler(Sampler):
     def _v_to_xstart_eps(self, x_t, t, v):
         assert x_t.shape == v.shape
         eps = (1 - t) * v + x_t
-        x_0 = (1 - self.sigma_min) * x_t - (self.sigma_min + (1 - self.sigma_min) * t) * v
+        x_0 = (1 - self.sigma_min) * x_t - (
+            self.sigma_min + (1 - self.sigma_min) * t
+        ) * v
         return x_0, eps
-    
+
     def _pred_to_xstart(self, x_t, t, pred):
-        return (1 - self.sigma_min) * x_t - (self.sigma_min + (1 - self.sigma_min) * t) * pred
+        return (1 - self.sigma_min) * x_t - (
+            self.sigma_min + (1 - self.sigma_min) * t
+        ) * pred
 
     def _xstart_to_pred(self, x_t, t, x_0):
-        return ((1 - self.sigma_min) * x_t - x_0) / (self.sigma_min + (1 - self.sigma_min) * t)
+        return ((1 - self.sigma_min) * x_t - x_0) / (
+            self.sigma_min + (1 - self.sigma_min) * t
+        )
 
     def _inference_model(self, model, x_t, t, cond=None, **kwargs):
-        t = torch.tensor([1000 * t] * x_t.shape[0], device=x_t.device, dtype=torch.float32)
+        t = torch.tensor(
+            [1000 * t] * x_t.shape[0], device=x_t.device, dtype=torch.float32
+        )
         return model(x_t, t, cond, **kwargs)
 
     def _get_model_prediction(self, model, x_t, t, cond=None, **kwargs):
@@ -52,17 +61,11 @@ class FlowEulerSampler(Sampler):
 
     @torch.no_grad()
     def sample_once(
-        self,
-        model,
-        x_t,
-        t: float,
-        t_prev: float,
-        cond: Optional[Any] = None,
-        **kwargs
+        self, model, x_t, t: float, t_prev: float, cond: Optional[Any] = None, **kwargs
     ):
         """
         Sample x_{t-1} from the model using Euler method.
-        
+
         Args:
             model: The model to sample from.
             x_t: The [N x C x ...] tensor of noisy inputs at time t.
@@ -76,7 +79,9 @@ class FlowEulerSampler(Sampler):
             - 'pred_x_prev': x_{t-1}.
             - 'pred_x_0': a prediction of x_0.
         """
-        pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs)
+        pred_x_0, pred_eps, pred_v = self._get_model_prediction(
+            model, x_t, t, cond, **kwargs
+        )
         pred_x_prev = x_t - (t - t_prev) * pred_v
         return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
 
@@ -94,7 +99,7 @@ class FlowEulerSampler(Sampler):
     ):
         """
         Generate samples from the model using Euler method.
-        
+
         Args:
             model: The model to sample from.
             noise: The initial noise tensor.
@@ -130,6 +135,7 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
     """
     Generate samples from a flow-matching model using Euler sampling with classifier-free guidance.
     """
+
     @torch.no_grad()
     def sample(
         self,
@@ -145,7 +151,7 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
     ):
         """
         Generate samples from the model using Euler method.
-        
+
         Args:
             model: The model to sample from.
             noise: The initial noise tensor.
@@ -163,13 +169,26 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
             - 'pred_x_t': a list of prediction of x_t.
             - 'pred_x_0': a list of prediction of x_0.
         """
-        return super().sample(model, noise, cond, steps, rescale_t, verbose, neg_cond=neg_cond, guidance_strength=guidance_strength, **kwargs)
+        return super().sample(
+            model,
+            noise,
+            cond,
+            steps,
+            rescale_t,
+            verbose,
+            neg_cond=neg_cond,
+            guidance_strength=guidance_strength,
+            **kwargs
+        )
 
 
-class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
+class FlowEulerGuidanceIntervalSampler(
+    GuidanceIntervalSamplerMixin, ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler
+):
     """
     Generate samples from a flow-matching model using Euler sampling with classifier-free guidance and interval.
     """
+
     @torch.no_grad()
     def sample(
         self,
@@ -186,7 +205,7 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierF
     ):
         """
         Generate samples from the model using Euler method.
-        
+
         Args:
             model: The model to sample from.
             noise: The initial noise tensor.
@@ -205,4 +224,15 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierF
             - 'pred_x_t': a list of prediction of x_t.
             - 'pred_x_0': a list of prediction of x_0.
         """
-        return super().sample(model, noise, cond, steps, rescale_t, verbose, neg_cond=neg_cond, guidance_strength=guidance_strength, guidance_interval=guidance_interval, **kwargs)
+        return super().sample(
+            model,
+            noise,
+            cond,
+            steps,
+            rescale_t,
+            verbose,
+            neg_cond=neg_cond,
+            guidance_strength=guidance_strength,
+            guidance_interval=guidance_interval,
+            **kwargs
+        )

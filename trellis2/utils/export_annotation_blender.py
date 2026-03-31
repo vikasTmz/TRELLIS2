@@ -4,7 +4,7 @@ from mathutils import Matrix
 
 # ---------------- USER SETTINGS ----------------
 OUTPATH = bpy.path.abspath(
-    "/Users/vthamizh/Documents/Research/Diffusion_models/Autodesk_BrepGen/output_trellis2/encode_decode_tests/pcb_vise_segment4.obj"
+    "/Users/vthamizh/Documents/Research/Diffusion_models/Autodesk_BrepGen/output_trellis2/encode_decode_tests/nurbs_surface.obj"
 )  # next to .blend
 COLOR_ATTR_NAME = "FaceColor"  # your color attribute name
 APPLY_TRANSFORMS = True  # True = world-space export, False = local-space

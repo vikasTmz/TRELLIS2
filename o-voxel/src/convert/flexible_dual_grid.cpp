@@ -8,7 +8,9 @@
 #include "api.h"
 
 
-
+#include <fstream>
+#include <iostream>
+#include <string>
 
 constexpr size_t kInvalidIndex = std::numeric_limits<size_t>::max();
 
@@ -60,6 +62,34 @@ struct hash<VoxelCoord> {
 };
 }
 
+
+void save_line_segments_to_obj(
+    const std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>>& segments, 
+    const std::string& filename
+) {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open file: " << filename << std::endl;
+        return;
+    }
+
+    // 1. Write vertices (2 per line segment)
+    for (const auto& seg : segments) {
+        file << "v " << seg.first.x() << " " << seg.first.y() << " " << seg.first.z() << "\n";
+        file << "v " << seg.second.x() << " " << seg.second.y() << " " << seg.second.z() << "\n";
+    }
+
+    // 2. Write line connections (Connecting vertex pairs)
+    for (size_t i = 0; i < segments.size(); ++i) {
+        // OBJ is 1-indexed, so endpoints are (2i+1) and (2i+2)
+        size_t idx1 = i * 2 + 1;
+        size_t idx2 = i * 2 + 2;
+        file << "l " << idx1 << " " << idx2 << "\n";
+    }
+
+    file.close();
+    std::cout << "Successfully saved lines to " << filename << std::endl;
+}
 
 void intersect_qef(
     const Eigen::Vector3f& voxel_size,
@@ -897,11 +927,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> lines_to_flexible_dual_g
     clock_t start, end;
     std::unordered_map<VoxelCoord, size_t> hash_table;
     std::vector<int3> voxels; 
-    std::vector<Eigen::Vector3f> means; 
+    std::vector<Eigen::Vector3f> means;
     std::vector<float> cnt; 
     std::vector<bool3> intersected; // Indicates if X, Y, or Z voxel faces are intersected
     std::vector<Eigen::Matrix4f> qefs; 
 
+    // Convert tensors to Eigen types
     Eigen::Vector3f e_voxel_size(voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]);
     Eigen::Vector3i e_grid_min(grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]);
     Eigen::Vector3i e_grid_max(grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]);
@@ -918,7 +949,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> lines_to_flexible_dual_g
             Eigen::Vector3f(v_ptr[v1_idx * 3 + 0], v_ptr[v1_idx * 3 + 1], v_ptr[v1_idx * 3 + 2])
         });
     }
-    
+
     intersect_lines_qef(e_voxel_size, e_grid_min, e_grid_max, line_segments, 
                         hash_table, voxels, means, cnt, intersected, qefs);
     

@@ -100,7 +100,19 @@ def lines_to_flexible_dual_grid(
             grid_size.size(0) == 3
         ), f"grid_size must have 3 elements, but got {grid_size.size(0)}"
 
-    # auto adjust aabb logic (omitted for brevity, keep identical to your mesh code)
+    if aabb is not None:
+        if isinstance(aabb, (list, tuple)):
+            aabb = np.array(aabb)
+        if isinstance(aabb, np.ndarray):
+            aabb = torch.tensor(aabb, dtype=torch.float32)
+        assert isinstance(
+            aabb, torch.Tensor
+        ), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
+        assert aabb.dim() == 2, f"aabb must be a 2D tensor, but got {aabb.shape}"
+        assert aabb.size(0) == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
+        assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
+
+    # Auto adjust aabb
     if aabb is None:
         min_xyz = vertices.min(dim=0).values
         max_xyz = vertices.max(dim=0).values
@@ -118,6 +130,7 @@ def lines_to_flexible_dual_grid(
 
         aabb = torch.stack([min_xyz, max_xyz], dim=0).float().cuda()
 
+    # Fill voxel size or grid size
     if voxel_size is None:
         voxel_size = (aabb[1] - aabb[0]) / grid_size
     if grid_size is None:
@@ -126,6 +139,12 @@ def lines_to_flexible_dual_grid(
     # subdivide lines
     vertices = vertices - aabb[0].reshape(1, 3)
     grid_range = torch.stack([torch.zeros_like(grid_size), grid_size], dim=0).int()
+
+    print("Running lines_to_flexible_dual_grid_cpu with:")
+    print(f"  vertices: {vertices.shape}")
+    print(f"  lines: {lines.shape}")
+    print(f"  voxel_size: {voxel_size}")
+    print(f"  grid_range: {grid_range.shape}")
 
     # Call the new C++ backend for lines
     ret = _C.lines_to_flexible_dual_grid_cpu(

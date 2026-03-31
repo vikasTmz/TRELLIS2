@@ -1,18 +1,46 @@
+import re
+import random
+import math
+import numpy as np
+import glob
+from collections import defaultdict
 import sys
 
-import torch
-import o_voxel
 import utils
 import trimesh
-import glob
-import numpy as np
 import imageio
 import utils3d
 
-
-import numpy as np
 import torch
-import trimesh
+import o_voxel
+
+
+# --- Vector Math Helpers ---
+def vec_sub(v1, v2):
+    return [v1[0] - v2[0], v1[1] - v2[1], v1[2] - v2[2]]
+
+
+def vec_len(v):
+    return math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
+
+
+def cross_product(a, b):
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
+
+def triangle_area(v0, v1, v2):
+    edge1 = vec_sub(v1, v0)
+    edge2 = vec_sub(v2, v0)
+    cross = cross_product(edge1, edge2)
+    return 0.5 * vec_len(cross)
+
+
+def line_length(v0, v1):
+    return vec_len(vec_sub(v1, v0))
 
 
 def export_lines_dual_grid_visualization(
@@ -119,6 +147,11 @@ def export_lines_dual_grid_visualization(
             (c000, c100, c101, c001),  # +y face
             (c000, c100, c110, c010),  # +z face
         ]
+
+        # Local intersected edges from voxel min corner
+        # edge_is_green[canon_edge(c011, c111)] = True
+        # edge_is_green[canon_edge(c101, c111)] = True
+        # edge_is_green[canon_edge(c110, c111)] = True
 
         quads = []
         for axis in range(3):
@@ -429,87 +462,126 @@ def export_mesh_dual_grid_visualization(
     print(f"Saved visualization to: {out_path}")
 
 
-def render(position, base_color, glb_path, type, voxel_size=1.0 / 64):
-    # Setup camera
-    extr = utils3d.extrinsics_look_at(
-        eye=torch.tensor([1.2, 0.5, 1.2]),
-        look_at=torch.tensor([0.0, 0.0, 0.0]),
-        up=torch.tensor([0.0, 1.0, 0.0]),
-    ).cuda()
-    intr = utils3d.intrinsics_from_fov_xy(
-        fov_x=torch.deg2rad(torch.tensor(45.0)),
-        fov_y=torch.deg2rad(torch.tensor(45.0)),
-    ).cuda()
+def import_obj_with_groups(input_path):
+    print(f"Reading {input_path}...")
 
-    # Render
-    renderer = o_voxel.rasterize.VoxelRenderer(
-        rendering_options={"resolution": 1024, "ssaa": 2}
-    )
-    output = renderer.render(
-        position=position,  # Voxel centers
-        attrs=base_color,  # Color/Opacity etc.
-        voxel_size=voxel_size,
-        extrinsics=extr,
-        intrinsics=intr,
-    )
-    image = np.clip(output.attr.permute(1, 2, 0).cpu().numpy() * 255, 0, 255).astype(
-        np.uint8
-    )
-    imageio.imwrite(glb_path.replace(".glb", f"_{type}.png").split("/")[-1], image)
+    vertices = []
+
+    # Structure: groups[group_id] = { 'faces': [], 'lines': [], 'area': 0.0, 'line_len': 0.0 }
+    groups = {}
+    current_group_id = None
+    edge_tracker = defaultdict(set)
+
+    re_vertex = re.compile(r"^v\s+([-\d\.eE]+)\s+([-\d\.eE]+)\s+([-\d\.eE]+)")
+    re_group = re.compile(r"^g\s+(.*)")
+
+    # 1. Parse OBJ File
+    with open(input_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # Vertices
+            if line.startswith("v "):
+                match = re_vertex.match(line)
+                if match:
+                    vertices.append(
+                        [
+                            float(match.group(1)),
+                            float(match.group(2)),
+                            float(match.group(3)),
+                        ]
+                    )
+                continue
+
+            # Groups (Extract Label ID)
+            if line.startswith("g "):
+                match = re_group.match(line)
+                if match:
+                    group_name = match.group(1).strip()
+                    # Extract numeric ID (e.g., "face 0" -> 0)
+                    numbers = re.findall(r"\d+", group_name)
+
+                    if numbers:
+                        # Convert to int to ensure "0" and "00" match if needed,
+                        # but keep as string for filename if that's safer.
+                        # User requested label:d, so let's treat as int.
+                        group_id = int(numbers[-1])
+                    else:
+                        # Fallback if no number found (unlikely based on your file)
+                        continue
+
+                    if group_id not in groups:
+                        groups[group_id] = {
+                            "faces": [],
+                            "lines": [],
+                            "color": [random.randint(50, 255) for _ in range(3)]
+                            + [255],
+                            "total_area": 0.0,
+                            "total_line_len": 0.0,
+                        }
+                    current_group_id = group_id
+                continue
+
+            # Faces
+            if line.startswith("f ") and current_group_id is not None:
+                parts = line.split()[1:]
+                idxs = [int(p.split("/")[0]) - 1 for p in parts]
+
+                # Triangulate fan
+                if len(idxs) >= 3:
+                    v0 = vertices[idxs[0]]
+                    for i in range(1, len(idxs) - 1):
+                        v1 = vertices[idxs[i]]
+                        v2 = vertices[idxs[i + 1]]
+                        area = triangle_area(v0, v1, v2)
+
+                        groups[current_group_id]["faces"].append(
+                            {"indices": [idxs[0], idxs[i], idxs[i + 1]], "area": area}
+                        )
+                        groups[current_group_id]["total_area"] += area
+
+                        # Register edges for boundary detection
+                        # Edges: (0, i), (i, i+1), (i+1, 0)
+                        tri = [idxs[0], idxs[i], idxs[i + 1]]
+                        edges = [
+                            tuple(sorted((tri[0], tri[1]))),
+                            tuple(sorted((tri[1], tri[2]))),
+                            tuple(sorted((tri[2], tri[0]))),
+                        ]
+                        for edge in edges:
+                            edge_tracker[edge].add(current_group_id)
+
+                continue
+
+            # Lines
+            if line.startswith("l ") and current_group_id is not None:
+                parts = line.split()[1:]
+                idxs = []
+                for p in parts:
+                    try:
+                        idxs.append(int(p) - 1)
+                    except ValueError:
+                        pass
+
+                for i in range(len(idxs) - 1):
+                    v_start = vertices[idxs[i]]
+                    v_end = vertices[idxs[i + 1]]
+                    length = line_length(v_start, v_end)
+
+                    groups[current_group_id]["lines"].append(
+                        {"indices": [idxs[i], idxs[i + 1]], "length": length}
+                    )
+                    groups[current_group_id]["total_line_len"] += length
+                continue
+
+    return vertices, groups, edge_tracker
 
 
-def process_lines(glb_path):
-    def load_obj_lines_as_path(obj_file):
-        vertices = []
-        segments = []
-        with open(obj_file, "r") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                tag = parts[0]
+def process_lines(vertices, lines, filename1, filename2):
 
-                if tag == "v":
-                    vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
-                elif tag == "l":
-                    # OBJ indices are 1-based, and may appear like "12" or "12/5"
-                    idx = [int(p.split("/")[0]) - 1 for p in parts[1:]]
-                    # turn polyline into pairwise segments
-                    for a, b in zip(idx[:-1], idx[1:]):
-                        segments.append([vertices[a], vertices[b]])
-
-        segments = np.asarray(segments, dtype=float)
-        path = trimesh.load_path(segments)
-        return path
-
-    print(f"\n\nProcessing {glb_path}...\n\n")
-    ext = glb_path.split(".")[-1].lower()
-    # asset = trimesh.load(glb_path, process=False)
-    asset = load_obj_lines_as_path(glb_path)
-
-    print(type(asset))  # trimesh.path.path.Path3D
-    print(asset.vertices.shape)  # (n, 3)
-
-    # 0. Normalize asset to unit cube
-    bounds = asset.bounds  # shape (2, 3): [min, max]
-    center = bounds.mean(axis=0)
-    extent = (bounds[1] - bounds[0]).max()
-    scale = 0.99999 / extent  # avoid edge-touching numerical issues
-
-    # Option A: if these methods exist in your trimesh version
-    asset.apply_translation(-center)
-    asset.apply_scale(scale)
-
-    lines = []
-
-    for e in asset.entities:
-        vertices = asset.vertices[e.points]
-        for i in range(len(vertices) - 1):
-            lines.append((i, i + 1))
-    lines = np.array(lines)
-
-    print(lines.shape)  # (num_lines, 2)
+    print(f"\nProcessing lines {filename1} for dual grid conversion...\n")
 
     # 1. Geometry Voxelization (Flexible Dual Grid)
     # Returns: occupied indices, dual vertices (QEF solution), and edge intersected
@@ -533,21 +605,12 @@ def process_lines(glb_path):
     dual_vertices = dual_vertices[mapping]
     intersected = intersected[mapping]
 
-    ## packing
-    dual_vertices_quant = dual_vertices * RES - voxel_indices
-    dual_vertices_quant = (torch.clamp(dual_vertices_quant, 0, 1) * 255).type(
-        torch.uint8
-    )
-    intersected_quant = (
-        intersected[:, 0:1] + 2 * intersected[:, 1:2] + 4 * intersected[:, 2:3]
-    ).type(torch.uint8)
-
     print(f"voxel_indices: {voxel_indices.shape}, {voxel_indices.dtype}")
     print(f"dual_vertices: {dual_vertices.shape}, {dual_vertices.dtype}")
     print(f"intersected: {intersected.shape}, {intersected.dtype}")
 
     # ------------------------------------------------------------
-    # ) Export dual vertices and intersected faces
+    # Export dual vertices and intersected faces
     # ------------------------------------------------------------
 
     export_lines_dual_grid_visualization(
@@ -555,15 +618,13 @@ def process_lines(glb_path):
         dual_vertices=dual_vertices,
         intersected=intersected,
         res=RES,
-        out_path=glb_path.replace("." + ext, "_dual_grid_debug." + ext).split("/")[-1],
+        out_path=filename1,
     )
 
     # ------------------------------------------------------------
-    # ) Export input vertices and lines to .obj
+    # Export input vertices and lines to .obj
     # ------------------------------------------------------------
-    with open(
-        glb_path.replace("." + ext, "_original_lines.obj").split("/")[-1], "w"
-    ) as f:
+    with open(filename2, "w") as f:
         for v in vertices:
             f.write(f"v {v[0]} {v[1]} {v[2]}\n")
         for line in lines:
@@ -571,23 +632,14 @@ def process_lines(glb_path):
             f.write(f"l {line[0]+1} {line[1]+1}\n")
 
 
-def process_mesh(glb_path):
-    print(f"\n\nProcessing {glb_path}...\n\n")
-    asset = trimesh.load(glb_path)
-
-    # 0. Normalize asset to unit cube
-    aabb = asset.bounding_box.bounds
-    center = (aabb[0] + aabb[1]) / 2
-    scale = 0.99999 / (aabb[1] - aabb[0]).max()  # To avoid numerical issues
-    asset.apply_translation(-center)
-    asset.apply_scale(scale)
-
-    # 1. Geometry Voxelization (Flexible Dual Grid)
-    # Returns: occupied indices, dual vertices (QEF solution), and edge intersected
-    mesh = asset.to_mesh()
-    print(
-        f"Mesh has {len(mesh.vertices)} vertices and {len(mesh.faces)} faces after normalization."
-    )
+def process_mesh(mesh, filename):
+    """
+    Process a triangular mesh and convert it to a flexible dual grid.
+    Input:
+    - mesh: a trimesh.Trimesh object containing the geometry to convert.
+    - filename: output filename for the visualization GLB.
+    """
+    print(f"\nProcessing mesh {filename} for dual grid conversion...\n")
 
     vertices = torch.from_numpy(mesh.vertices).float()
     faces = torch.from_numpy(mesh.faces).long()
@@ -610,36 +662,9 @@ def process_mesh(glb_path):
     dual_vertices = dual_vertices[mapping]
     intersected = intersected[mapping]
 
-    ## packing
-    dual_vertices_quant = dual_vertices * RES - voxel_indices
-    dual_vertices_quant = (torch.clamp(dual_vertices_quant, 0, 1) * 255).type(
-        torch.uint8
-    )
-    intersected_quant = (
-        intersected[:, 0:1] + 2 * intersected[:, 1:2] + 4 * intersected[:, 2:3]
-    ).type(torch.uint8)
-
     print(f"voxel_indices: {voxel_indices.shape}, {voxel_indices.dtype}")
     print(f"dual_vertices: {dual_vertices.shape}, {dual_vertices.dtype}")
     print(f"intersected: {intersected.shape}, {intersected.dtype}")
-
-    # o_voxel.io.write(glb_path.replace(".glb", ".vxz"), voxel_indices, attributes)
-
-    # render(
-    #     (voxel_indices / RES - 0.5).cuda(),
-    #     (voxel_indices / RES).cuda(),
-    #     glb_path,
-    #     type="voxels",
-    #     voxel_size=1.0 / RES,
-    # )
-
-    # render(
-    #     (dual_vertices).cuda() * 0.7,
-    #     torch.clamp(dual_vertices + 0.5, 0.0, 1.0).cuda(),
-    #     glb_path,
-    #     type="dualvertices",
-    #     voxel_size=0.25 / RES,
-    # )
 
     # ------------------------------------------------------------
     # ) Export dual vertices and intersected edges
@@ -650,10 +675,8 @@ def process_mesh(glb_path):
         dual_vertices=dual_vertices,
         intersected=intersected,
         res=RES,
-        out_path=glb_path.replace(".glb", f"_{RES}_dual_grid_debug.glb").split("/")[-1],
+        out_path=filename,
     )
-
-    mesh.export(glb_path.replace(".glb", "_original_mesh.obj").split("/")[-1])
 
 
 if __name__ == "__main__":
@@ -661,14 +684,101 @@ if __name__ == "__main__":
     RES = sys.argv[1] if len(sys.argv) > 1 else 16
     RES = int(RES)
 
-    # glb_paths = glob.glob(
-    #     "/home/vthamizharas/Documents/TRELLIS.2/datasets/ObjaverseXL_sketchfab/raw/hf-objaverse-v1/glbs/**/*.glb"
-    # )
-    glb_paths = glob.glob("shapes/pcb_vise_segment1_boundarysurface.glb")
+    print(f"Using resolution: {RES}")
 
-    for glb_path in glb_paths:
-        ext = glb_path.split(".")[-1].lower()
-        if ext == "obj":
-            process_lines(glb_path)
-        elif ext == "glb":
-            process_mesh(glb_path)
+    # shape_paths = glob.glob(
+    #     "/home/vthamizharas/Documents/TRELLIS.2/assets/breps/abc/00000012_f1*"
+    #     # "/home/vthamizharas/Documents/TRELLIS.2/datasets/ObjaverseXL_sketchfab/raw/hf-objaverse-v1/glbs/**/*.glb"
+    # )
+    shape_paths = glob.glob("shapes/pcb_vise_segment1.obj")
+
+    for shape_path in shape_paths:
+        ext = shape_path.split(".")[-1].lower()
+        basename = shape_path.split("/")[-1].split(".")[0]
+        basename = f"{basename}_res{RES}"
+
+        vertices, groups, edge_tracker = import_obj_with_groups(shape_path)
+
+        # 0. Normalize vertices to unit cube
+        aabb = [
+            [min(v[i] for v in vertices), max(v[i] for v in vertices)] for i in range(3)
+        ]
+        center = [(aabb[i][0] + aabb[i][1]) / 2 for i in range(3)]
+        scale = 0.99999 / max(aabb[i][1] - aabb[i][0] for i in range(3))
+        vertices = [[(v[i] - center[i]) * scale for i in range(3)] for v in vertices]
+
+        # Convert vertices to numpy once
+        np_vertices = np.array(vertices)
+
+        # ---------------------------------------------------------------------
+        # Compute Dual Grid for triangular mesh faces and export visualization
+        # ---------------------------------------------------------------------
+        scene = trimesh.Scene()
+        for gid, data in groups.items():
+            if not data["faces"]:
+                continue
+
+            group_indices = np.unique(
+                np.array([f["indices"] for f in data["faces"]]).flatten()
+            )
+            idx_map = np.full(np.max(group_indices) + 1, -1, dtype=int)
+            idx_map[group_indices] = np.arange(len(group_indices))
+            new_vertices = np_vertices[group_indices]
+            old_faces = np.array([f["indices"] for f in data["faces"]])
+            new_faces = idx_map[old_faces]
+
+            mesh = trimesh.Trimesh(
+                vertices=new_vertices,
+                faces=new_faces,
+                process=False,  # Don't merge vertices or re-order
+            )
+
+            # Apply the group color
+            mesh.visual.face_colors = data["color"]
+
+            # Add to scene with a name
+            scene.add_geometry(mesh, node_name=f"Group_{gid}")
+
+            break
+
+        process_mesh(scene.to_mesh(), f"outputs/{basename}_mesh_dual_grid.glb")
+
+        scene.export(f"outputs/{basename}_original_mesh.glb")
+
+        # -------------------------------------------------------------
+        # Compute Dual Grid for line segments and export visualization
+        # -------------------------------------------------------------
+        print("Calculating boundary edges...")
+        boundary_edges = []
+        # Check our edge tracker
+        print(f"Total unique edges: {len(edge_tracker)}")
+        for edge, connected_groups in edge_tracker.items():
+            # Definition: A boundary is an edge connected to > 1 DIFFERENT groups
+            if len(connected_groups) > 1 and connected_groups == {0, 1}:
+                boundary_edges.append([edge[0], edge[1]])
+
+        old_to_new = {}
+        boundary_vertices_list = []
+        boundary_lines = []
+
+        for old_i, old_j in boundary_edges:
+            if old_i not in old_to_new:
+                old_to_new[old_i] = len(boundary_vertices_list)
+                boundary_vertices_list.append(np_vertices[old_i])
+
+            if old_j not in old_to_new:
+                old_to_new[old_j] = len(boundary_vertices_list)
+                boundary_vertices_list.append(np_vertices[old_j])
+
+            new_i = old_to_new[old_i]
+            new_j = old_to_new[old_j]
+            boundary_lines.append([new_i, new_j])
+
+        boundary_vertices = np.asarray(boundary_vertices_list, dtype=np_vertices.dtype)
+
+        process_lines(
+            boundary_vertices,
+            np.array(boundary_lines),
+            f"outputs/{basename}_line_dual_grid.glb",
+            f"outputs/{basename}_original_lines.obj",
+        )

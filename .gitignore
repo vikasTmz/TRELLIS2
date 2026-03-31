@@ -209,5 +209,10 @@ __marimo__/
 # NEW
 assets/*
 datasets/*
-output/*
+*output*/*
 ._*
+o-voxel/examples/shapes/
+o-voxel/examples/outputs/
+
+# Ignore all .DS_Store files
+.DS_Store
