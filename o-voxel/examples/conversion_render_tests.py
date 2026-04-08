@@ -657,18 +657,25 @@ def process_mesh(glb_path):
 
 
 if __name__ == "__main__":
-    # Read RES from stdin argument
+    # Read RES from stdin argumentls
     RES = sys.argv[1] if len(sys.argv) > 1 else 16
     RES = int(RES)
 
     # glb_paths = glob.glob(
     #     "/home/vthamizharas/Documents/TRELLIS.2/datasets/ObjaverseXL_sketchfab/raw/hf-objaverse-v1/glbs/**/*.glb"
     # )
-    glb_paths = glob.glob("shapes/pcb_vise_segment1_boundarysurface.glb")
+    # glb_paths = glob.glob("shapes/pcb_vise_segment1_boundarysurface.glb")
+
+    glb_paths = glob.glob(
+        "/home/vthamizharas/Documents/TRELLIS.2/brep_parquet_outputs/r=e100_k=8e2_v=3e3/*.glb"
+    )
 
     for glb_path in glb_paths:
         ext = glb_path.split(".")[-1].lower()
-        if ext == "obj":
-            process_lines(glb_path)
-        elif ext == "glb":
-            process_mesh(glb_path)
+        try:
+            if ext == "obj":
+                process_lines(glb_path)
+            elif ext == "glb":
+                process_mesh(glb_path)
+        except Exception as e:
+            print(f"Error processing {glb_path}: {e}")

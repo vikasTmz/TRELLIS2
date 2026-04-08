@@ -4,14 +4,12 @@ import imageio
 import o_voxel
 import utils3d
 
-RES = 64
+RES = 512
 
 # Load data
 coords, data = o_voxel.io.read("ovoxel_helmet.vxz")
 position = (coords / RES - 0.5).cuda()
-# base_color = (data["base_color"] / 255).cuda()
-
-base_color = (data["dual_vertices"] / 255).cuda()
+base_color = (data["base_color"] / data["base_color"] - 0.5).cuda()
 
 # Setup camera
 extr = utils3d.extrinsics_look_at(
@@ -26,7 +24,7 @@ intr = utils3d.intrinsics_from_fov_xy(
 
 # Render
 renderer = o_voxel.rasterize.VoxelRenderer(
-    rendering_options={"resolution": 1024, "ssaa": 2}
+    rendering_options={"resolution": 512, "ssaa": 2}
 )
 output = renderer.render(
     position=position,  # Voxel centers
