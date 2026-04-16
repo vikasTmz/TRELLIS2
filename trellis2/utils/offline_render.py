@@ -181,11 +181,12 @@ def offscreen_render_turntable(mesh, filename):
     #     print(f"Error processing {filename}: {e}")
     #     continue
 
+
 def offscreen_render_fixedviews(mesh, filename):
     # try:
 
-    mesh = mesh.copy()
-    mesh.apply_scale(0.005)
+    # mesh = mesh.copy()
+    mesh.apply_scale(0.5)
     mesh = Mesh.from_trimesh(mesh, smooth=False)
 
     # Base pose of the tripoSG (you can tweak this)
@@ -252,7 +253,6 @@ def offscreen_render_fixedviews(mesh, filename):
     width, height = 512 * 2, 512 * 2
     r = OffscreenRenderer(viewport_width=width, viewport_height=height)
 
-
     # Compute object center in world coords (here we use the translation part of base_pose)
     object_center = base_pose[:3, 3]
 
@@ -262,8 +262,8 @@ def offscreen_render_fixedviews(mesh, filename):
 
     poses = [
         [[0, 0, 1], [np.pi / 4, np.pi * 3 / 4]],
-        [[0, 0, 1], [np.pi, 3 * np.pi / 2]],
-        [[0, 1, 0], [np.pi / 2, -np.pi / 2]],
+        # [[0, 0, 1], [np.pi, 3 * np.pi / 2]],
+        # [[0, 1, 0], [np.pi / 2, -np.pi / 2]],
     ]
 
     combined = None

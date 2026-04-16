@@ -630,21 +630,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         torch.manual_seed(seed)
         cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != "512" else None
-        # save cond_512 and cond_1024 to disk
-        torch.save(
-            cond_512,
-            f"/home/vthamizharas/Documents/TRELLIS.2/output/image_variations/cond_512_{filename}.pth",
-        )
-        if cond_1024 is not None:
-            torch.save(
-                cond_1024,
-                f"/home/vthamizharas/Documents/TRELLIS.2/output/image_variations/cond_1024_{filename}.pth",
-            )
+
         ss_res = {"512": 32, "1024": 64, "1024_cascade": 32, "1536_cascade": 32}[
             pipeline_type
         ]
         coords = self.sample_sparse_structure(
             cond_512, ss_res, num_samples, sparse_structure_sampler_params
+        )
+
+        pack = {
+            "coords": coords.cpu().numpy().astype(np.uint8),
+        }
+        np.savez_compressed(
+            f"/home/vthamizharas/Documents/TRELLIS.2/datasets/Thingi10K/images/shape_latents/{filename}.npz",
+            **pack,
         )
 
         logging.info(f"\n\n Sparse structure shape: {coords.shape} \n\n ")
@@ -715,9 +714,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             )
         torch.cuda.empty_cache()
         logging.info(f" \n\n Shape slat shape: {shape_slat.shape}  \n\n")
-        torch.save(
-            shape_slat,
-            f"/home/vthamizharas/Documents/TRELLIS.2/output/image_variations/shape_slat_{filename}.pth",
+
+        pack = {
+            "feats": shape_slat.feats.cpu().numpy().astype(np.float32),
+            "coords": shape_slat.coords[:, :].cpu().numpy().astype(np.uint8),
+        }
+        np.savez_compressed(
+            f"/home/vthamizharas/Documents/TRELLIS.2/datasets/Thingi10K/images/slats/{filename}.npz",
+            **pack,
         )
         out_mesh = self.decode_latent(shape_slat, tex_slat, res)
 

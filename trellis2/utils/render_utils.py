@@ -189,3 +189,15 @@ def make_pbr_vis_frames(result, resolution=1024, input=None):
         # frame = np.concatenate([row1, row2], axis=0)
         frames.append(row1)
     return frames
+
+
+def make_vis_frames(result, resolution=1024, input=None):
+    num_frames = len(result["normal"])
+    frames = []
+    for i in range(num_frames):
+        # multiply normal by mask to remove background
+        result["normal"][i][result["mask"][i] == 0] = 255
+        normal = Image.fromarray(result["normal"][i])
+        normal = normal.resize((resolution, resolution))
+        frames.append(normal)
+    return frames

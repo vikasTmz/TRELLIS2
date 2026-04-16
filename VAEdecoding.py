@@ -8,14 +8,53 @@ import numpy as np
 import torch
 import json
 from huggingface_hub import login
+import imageio
+import trimesh
 
-from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.modules.sparse import SparseTensor
 
 from trellis2.utils.vae_helpers import *
+from trellis2.utils import render_utils
 
 
-def generate_combinations(
+# Helper for Python < 3.10 compatibility
+class nullcontext:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
+
+
+# ---------------------------------------------------------------------
+# Environment tweaks
+# ---------------------------------------------------------------------
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["ATTN_BACKEND"] = "xformers"
+
+# Check if we are in a notebook
+try:
+    from trellis2.pipelines import Trellis2ImageTo3DPipeline
+    from trellis2.modules.sparse import SparseTensor
+    import trellis2.models as models
+except ImportError:
+    print(
+        "Error: trellis2 module not found. Make sure you are in the correct environment."
+    )
+
+from PIL import Image
+
+os.environ["PYOPENGL_PLATFORM"] = (
+    "egl"  # must come before importing pyrender, OpenGL, etc.
+)
+
+# --- pyrender imports must come after pyglet option set ---
+import pyglet
+
+pyglet.options["shadow_window"] = False
+
+
+def generate_combinations_v1(
     ss_dir: Path, shape_dir: Path
 ) -> Iterator[Tuple[str, Path, Path]]:
     ss_map: Dict[str, Path] = {p.stem: p for p in ss_dir.glob("*.npz")}
@@ -31,6 +70,34 @@ def generate_combinations(
                 yield name, ss_map[ss_map_name], shape_map[shape_map_name], ss_map[
                     shape_map_name
                 ], shape_map[ss_map_name]
+
+
+def generate_combinations_v2(
+    ss_dir: Path, shape_dir: Path
+) -> Iterator[Tuple[str, Path, Path]]:
+    ss_map: Dict[str, Path] = {p.stem: p for p in ss_dir.glob("*.npz")}
+    shape_map: Dict[str, Path] = {p.stem: p for p in shape_dir.glob("*.npz")}
+
+    with open("o-voxel/examples/parquet_name2sha.json", "r") as file:
+        parquet_name2sha = json.load(file)
+
+    for key in parquet_name2sha.keys():
+        if parquet_name2sha[key] in shape_map:
+            yield key, shape_map[parquet_name2sha[key]], (
+                ss_map[parquet_name2sha[key]]
+                if parquet_name2sha[key] in ss_map
+                else None
+            )
+
+
+def generate_combinations_v3(
+    ss_dir: Path, shape_dir: Path
+) -> Iterator[Tuple[str, Path, Path]]:
+    ss_map: Dict[str, Path] = {p.stem: p for p in ss_dir.glob("*.npz")}
+    shape_map: Dict[str, Path] = {p.stem: p for p in shape_dir.glob("*.npz")}
+
+    for key in shape_map.keys():
+        yield key, shape_map[key], (ss_map[key] if key in ss_map else None)
 
 
 # ---------------------------------------------------------------------
@@ -50,6 +117,14 @@ def main() -> None:
     )
     parser.add_argument("--out_dir", type=Path, default=None)
     parser.add_argument("--model_id", type=str, default="microsoft/TRELLIS.2-4B")
+    parser.add_argument(
+        "--decoder_pretrained",
+        type=list[str],
+        default=[
+            "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
+            "microsoft/TRELLIS.2-4B/ckpts/shape_dec_next_dc_f16c32_fp16",
+        ],
+    )
     parser.add_argument(
         "--low_vram", action="store_true", help="Enable TRELLIS.2 low_vram mode."
     )
@@ -96,11 +171,12 @@ def main() -> None:
     LOGGER.info(f"Loading pipeline {args.model_id} ...")
 
     # Load Pipeline
-    pipeline = Trellis2ImageTo3DPipeline.from_pretrained(args.model_id)
-    pipeline.cuda()
-    pipeline.low_vram = bool(args.low_vram)
+    decoder_slat = models.from_pretrained(args.decoder_pretrained[0]).eval().cuda()
+    decoder_slat.low_vram = bool(args.low_vram)
 
-    LOGGER.info(f"Pipeline loaded. low_vram={pipeline.low_vram}")
+    decoder_shape = models.from_pretrained(args.decoder_pretrained[1]).eval().cuda()
+    decoder_shape.low_vram = bool(args.low_vram)
+
     torch.cuda.reset_peak_memory_stats()
     log_cuda_memory("after_pipeline_load")
 
@@ -137,14 +213,12 @@ def main() -> None:
             )
 
             # Process files
-            exp_combinations = generate_combinations(ss_dir, shape_dir)
+            exp_combinations = generate_combinations_v3(ss_dir, shape_dir)
 
             for (
                 key,
-                ss_path,
                 shape_path,
-                ss_path_temp,
-                shape_path_temp,
+                ss_path,
             ) in exp_combinations:
                 torch.cuda.reset_peak_memory_stats()
 
@@ -153,7 +227,6 @@ def main() -> None:
                 # 1. Load latents (CPU)
                 feats_np, coords_np = load_shape_latent_npz(shape_path)
                 z_np = load_ss_latent_npz(ss_path) if args.use_ss_decoder else None
-                feats_np_temp, _ = load_shape_latent_npz(shape_path_temp)
 
                 # 2. Move to GPU
                 feats = torch.from_numpy(feats_np).to(
@@ -169,10 +242,6 @@ def main() -> None:
                     f"Loaded latents: feats shape {feats.shape}, coords shape {enc_coords.shape}"
                 )
 
-                feats_temp = torch.from_numpy(feats_np_temp).to(
-                    device=device, dtype=compute_dtype, non_blocking=True
-                )
-
                 # 3. Optional: Decode Sparse Structure coords
                 if args.use_ss_decoder:
                     LOGGER.info("Decoding sparse structure coordinates...")
@@ -184,16 +253,18 @@ def main() -> None:
                         z_s = z_s.unsqueeze(0)
 
                     dec_coords, decoded = decode_sparse_structure_coords(
-                        pipeline,
+                        decoder_slat,
                         z_s,
                         target_resolution=64,
                         pool_on_cpu=args.pool_on_cpu,
                     )
                     dec_coords = dec_coords.to(device)
 
-                LOGGER.info(f"Decoded latents coords shape {dec_coords.shape}")
+                    LOGGER.info(f"Decoded latents coords shape {dec_coords.shape}")
+                    coords = dec_coords
+                else:
+                    coords = enc_coords
 
-                coords = dec_coords
                 ## take intersection of dec_coords and enc_coords
                 # dec_coords_set = set(map(tuple, dec_coords.cpu().numpy()))
                 # enc_coords_set = set(map(tuple, enc_coords.cpu().numpy()))
@@ -224,12 +295,17 @@ def main() -> None:
                 #     f"After intersection, feats shape: {feats.shape}, coords shape: {coords.shape}"
                 # )
 
-                export_voxels_as_cubes_mesh(
-                    args.out_dir
-                    / f"VOXELS_{key}_{res}{'_from_dec-coords.ply' if args.use_ss_decoder else '_from_enc-coords.ply'}",
-                    coords,
-                    voxel_size=1.0,
+                # export_voxels_as_cubes_mesh(
+                #     args.out_dir
+                #     / f"VOXELS_{key}_{res}{'_from_dec-coords.ply' if args.use_ss_decoder else '_from_enc-coords.ply'}",
+                #     coords,
+                #     voxel_size=1.0,
+                # )
+
+                out_name = f"{key}_{res}" + (
+                    "_from_dec-coords" if args.use_ss_decoder else "_from_enc-coords"
                 )
+                out_path = args.out_dir / f"{out_name}"
 
                 # 4. Construct SparseTensor
                 shape_slat = SparseTensor(feats=feats, coords=coords)
@@ -241,7 +317,7 @@ def main() -> None:
 
                 # 5. Decode Meshes
                 meshes = decode_meshes_from_shape_slat(
-                    pipeline,
+                    decoder_shape.cuda(),
                     shape_slat,
                     resolution=res,
                     return_subs=False,
@@ -249,20 +325,32 @@ def main() -> None:
 
                 # 6. Post-processing
                 mesh = meshes[0]
-                # mesh.fill_holes()
+                mesh.fill_holes()
 
-                # if args.decimate_faces and args.decimate_faces > 0:
-                #     mesh.simplify(args.decimate_faces)
+                if args.decimate_faces and args.decimate_faces > 0:
+                    mesh.simplify(args.decimate_faces)
 
                 # 7. Export
                 v = mesh.vertices.detach().cpu().numpy().astype(np.float32)
                 f = mesh.faces.detach().cpu().numpy().astype(np.int32)
 
-                out_name = f"{key}_{res}" + (
-                    "_from_dec-coords" if args.use_ss_decoder else "_from_enc-coords"
+                # write_ply_binary(f"{out_path}.ply", v, f)
+
+                trellis_video = render_utils.make_vis_frames(
+                    render_utils.render_video(mesh, num_frames=70)
                 )
-                out_path = args.out_dir / f"{out_name}.ply"
-                write_ply_binary(out_path, v, f)
+                imageio.mimsave(
+                    f"{out_path}.mp4",
+                    trellis_video,
+                    fps=15,
+                )
+
+                img = render_voxels_pyvista(
+                    coords_np,
+                    surf_idx=np.arange(len(coords_np)),
+                    bound_idx=None,
+                    out_path=f"{out_path}.jpg",
+                )
 
                 log_cuda_memory(f"{key}: after_export")
                 LOGGER.info(f"Wrote {out_path}")

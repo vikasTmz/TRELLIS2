@@ -38,6 +38,7 @@ os.environ["ATTN_BACKEND"] = "xformers"
 try:
     from trellis2.pipelines import Trellis2ImageTo3DPipeline
     from trellis2.modules.sparse import SparseTensor
+    import trellis2.models as models
 except ImportError:
     print(
         "Error: trellis2 module not found. Make sure you are in the correct environment."
@@ -108,6 +109,12 @@ def load_shape_latent_npz(path: Path) -> Tuple[np.ndarray, np.ndarray]:
         feats = data["feats"]
         coords = data["coords"]
     return feats, coords
+
+
+def load_coords_latent_npz(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    with np.load(path) as data:
+        coords = data["coords"]
+    return coords
 
 
 def load_ss_latent_npz(path: Path) -> np.ndarray:
@@ -239,7 +246,7 @@ def nearest_neighbor_kdtree(
 
 
 def decode_sparse_structure_coords(
-    pipeline: Trellis2ImageTo3DPipeline,
+    decoder,
     z_s: torch.Tensor,
     target_resolution: int = 64,
     pool_on_cpu: bool = True,
@@ -247,14 +254,15 @@ def decode_sparse_structure_coords(
     """
     Decodes sparse structure latent z_s into coordinates.
     """
-    decoder = pipeline.models["sparse_structure_decoder"]
 
-    if pipeline.low_vram:
-        decoder.to(pipeline.device)
+    if decoder.low_vram:
+        decoder.to(decoder.device)
 
-    decoded = decoder(z_s) > 0  # bool tensor
+    decoded = decoder(z_s)
 
-    if pipeline.low_vram:
+    decoded = decoded > 0  # bool tensor
+
+    if decoder.low_vram:
         decoder.cpu()
 
     LOGGER.info(f"Decoded sparse structure shape before max pool: {decoded.shape}")
@@ -268,16 +276,15 @@ def decode_sparse_structure_coords(
         else:
             decoded = F.max_pool3d(decoded.to(torch.float16), ratio, ratio, 0) > 0.5
 
-    LOGGER.info(f"Decoded sparse structure shape after max pool: {decoded.shape}")
-
     coords = (
         decoded.nonzero(as_tuple=False)[:, [0, 2, 3, 4]].to(torch.int32).contiguous()
     )
+
     return coords, decoded
 
 
 def decode_meshes_from_shape_slat(
-    pipeline: Trellis2ImageTo3DPipeline,
+    shape_decoder,
     shape_slat: SparseTensor,
     resolution: int,
     return_subs: bool = False,
@@ -285,16 +292,15 @@ def decode_meshes_from_shape_slat(
     """
     Decodes shape features into a mesh.
     """
-    shape_decoder = pipeline.models["shape_slat_decoder"]
     shape_decoder.set_resolution(resolution)
 
-    if pipeline.low_vram:
-        shape_decoder.to(pipeline.device)
+    if shape_decoder.low_vram:
+        shape_decoder.to(shape_decoder.device)
         shape_decoder.low_vram = True
 
     ret = shape_decoder(shape_slat, return_subs=return_subs)
 
-    if pipeline.low_vram:
+    if shape_decoder.low_vram:
         shape_decoder.cpu()
         shape_decoder.low_vram = False
 
@@ -385,6 +391,10 @@ def explode(data):
 def render_voxels_mpl_toolkits(coords, out_path):
     """ """
     # Shift to a compact index space for the boolean occupancy grid
+
+    if coords.shape[1] == 4:
+        coords = coords[:, 1:4]
+
     mins = coords.min(axis=0)
     idx = coords - mins
     shape = idx.max(axis=0) + 1
@@ -435,6 +445,10 @@ def render_voxels_pyvista(
     window_size=(1024, 1024),
     as_pil=True,
 ):
+
+    if coords.shape[1] == 4:
+        coords = coords[:, 1:4]
+
     coords = np.asarray(coords, dtype=np.int32)
     if coords.ndim != 2 or coords.shape[1] != 3:
         raise ValueError("coords must have shape (N, 3)")
