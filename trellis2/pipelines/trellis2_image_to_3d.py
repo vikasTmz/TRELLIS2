@@ -642,7 +642,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             "coords": coords.cpu().numpy().astype(np.uint8),
         }
         np.savez_compressed(
-            f"/home/vthamizharas/Documents/TRELLIS.2/datasets/Thingi10K/images/shape_latents/{filename}.npz",
+            f"/home/vthamizharas/Documents/TRELLIS.2/datasets/Fusion360/images/shape_latents/{filename}.npz",
             **pack,
         )
 
@@ -720,7 +720,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             "coords": shape_slat.coords[:, :].cpu().numpy().astype(np.uint8),
         }
         np.savez_compressed(
-            f"/home/vthamizharas/Documents/TRELLIS.2/datasets/Thingi10K/images/slats/{filename}.npz",
+            f"/home/vthamizharas/Documents/TRELLIS.2/datasets/Fusion360/images/slats/{filename}.npz",
             **pack,
         )
         out_mesh = self.decode_latent(shape_slat, tex_slat, res)

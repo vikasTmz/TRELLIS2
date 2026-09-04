@@ -70,6 +70,69 @@ def export_boundaries_glb(
     print(f"[PID {os.getpid()}] Saved edges: {edge_obj_path}")
 
 
+def export_gvd(
+    surface_vertices: np.ndarray,
+    surface_faces: np.ndarray,
+    edge_points: np.ndarray,
+    edge_segments: np.ndarray,
+    edge_obj_path: PathLike,
+    pts_obj: Optional[PathLike] = None,
+) -> None:
+    print(f"[PID {os.getpid()}] Calculating boundary edges: {edge_obj_path}")
+
+    boundary_segments = np.concatenate(
+        [
+            edge_points[edge_segments[:, 0:1]],
+            edge_points[edge_segments[:, 1:2]],
+        ],
+        axis=1,
+    )
+
+    # Convert group dictionary into flat mesh arrays plus one B-Rep patch id per triangle.
+    V, F, face_patch_ids = arrays_from_importer_groups(surface_vertices, groups)
+
+    # Optional: infer topological patch adjacency from shared/quantized geometric edges.
+    adjacent_patch_pairs, inferred_boundary_segments = patch_adjacency_from_mesh(
+        V,
+        F,
+        face_patch_ids,
+        ndigits=6,
+    )
+
+    # Full GVD: includes sheets between any two patches that become nearest neighbors
+    # inside the sampled bounding box.
+    # gvd = compute_generalized_voronoi(
+    #     V,
+    #     F,
+    #     face_patch_ids,
+    #     resolution=256,
+    #     padding=0.08,
+    #     max_distance=None,
+    #     inside_only=False,
+    #     allowed_pairs=None,
+    #     neighborhood=26,
+    #     batch_size=200_000,
+    #     verbose=True,
+    # )
+    gvd = compute_generalized_voronoi(
+        V,
+        F,
+        face_patch_ids,
+        resolution=160,
+        padding=0.08,
+        allowed_pairs=adjacent_patch_pairs,
+        neighborhood=26,
+        verbose=True,
+        inside_only=True,
+    )
+
+    paths = gvd.export(output_path + "_boundary")
+    print(paths)
+
+    # Optional: export your detected B-Rep edges as OBJ lines.
+    export_segments_obj(boundary_segments, output_path + "_boundary.obj")
+
+
 def process_abc_to_trellismesh(
     geom: Dict[str, np.ndarray],
     surface_obj_path: PathLike,
@@ -87,6 +150,14 @@ def process_abc_to_trellismesh(
     #     edge_obj_path,
     #     pts_obj,
     # )
+    export_gvd(
+        geom["surface_vertices"],
+        geom["surface_faces"],
+        geom["edge_points"],
+        geom["edge_segments"],
+        edge_obj_path,
+        pts_obj,
+    )
 
 
 def process_one_sample(i: int, row: RowDict, out_dir: PathLike) -> int:

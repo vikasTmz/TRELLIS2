@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logging.info("Loaded modules")
 
-ROOT = "/home/vthamizharas/Documents/TRELLIS.2/datasets/Thingi10K/images/"
+ROOT = "/home/vthamizharas/Documents/TRELLIS.2/datasets/Fusion360/images/"
 input_imgs = sorted(glob.glob(f"{ROOT}/imgs/*"))
 print(input_imgs)
 
@@ -56,7 +56,7 @@ for img_path in input_imgs:
         basename = basename.replace(" ", "")
 
         # ["512", "1024","1024_cascade", "1536_cascade"]
-        for pipeline_type in ["1024_cascade", "512", "1024"]:
+        for pipeline_type in ["1024_cascade"]:
             filename = f"{basename}_{pipeline_type}"
             mesh = pipeline.run(
                 image, filename, num_samples=1, pipeline_type=pipeline_type

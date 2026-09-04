@@ -13,11 +13,11 @@ def compute_file_sha256(file_path):
 import glob
 
 files = glob.glob(
-    "/home/vthamizharas/Documents/TRELLIS.2/datasets/Thingi10K/gt_shapes/*glb"
+    "/home/vthamizharas/Documents/TRELLIS.2/datasets/Fusion360/gt_shapes/*glb"
 )
 
 with open(
-    "/home/vthamizharas/Documents/TRELLIS.2/datasets/Thingi10K/metadata.csv",
+    "/home/vthamizharas/Documents/TRELLIS.2/datasets/Fusion360/metadata.csv",
     "w",
 ) as csv_file:
     csv_file.write(f"sha256,local_path\n")
@@ -25,6 +25,6 @@ with open(
         sha256 = compute_file_sha256(filename)
         # write to CSV
         filename = filename.split(
-            "/home/vthamizharas/Documents/TRELLIS.2/datasets/Thingi10K/"
+            "/home/vthamizharas/Documents/TRELLIS.2/datasets/Fusion360/"
         )[-1]
         csv_file.write(f"{sha256},{filename}\n")

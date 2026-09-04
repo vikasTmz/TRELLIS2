@@ -82,7 +82,7 @@ def generate_combinations_v2(
         parquet_name2sha = json.load(file)
 
     for key in parquet_name2sha.keys():
-        if parquet_name2sha[key] in shape_map:
+        if parquet_name2sha[key] in shape_map and key.split("_")[-1] == "edges":
             yield key, shape_map[parquet_name2sha[key]], (
                 ss_map[parquet_name2sha[key]]
                 if parquet_name2sha[key] in ss_map
@@ -100,12 +100,34 @@ def generate_combinations_v3(
         yield key, shape_map[key], (ss_map[key] if key in ss_map else None)
 
 
+def generate_combinations_v4(
+    ss_dir: Path, shape_dir: Path
+) -> Iterator[Tuple[str, Path, Path]]:
+    ss_map: Dict[str, Path] = {p.stem: p for p in ss_dir.glob("*.npz")}
+    shape_map: Dict[str, Path] = {p.stem: p for p in shape_dir.glob("*.npz")}
+
+    with open("o-voxel/examples/parquet_name2sha.json", "r") as file:
+        parquet_name2sha = json.load(file)
+
+    for i in range(0, 35):
+        surface_name = f"sample_{i:06d}_surface"
+        edge_name = f"sample_{i:06d}_edges"
+        if (
+            parquet_name2sha[edge_name] in shape_map
+            and parquet_name2sha[surface_name] in shape_map
+        ):
+            yield edge_name, shape_map[parquet_name2sha[edge_name]], None, shape_map[
+                parquet_name2sha[surface_name]
+            ], None
+
+
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
 """
-python VAEdecoding.py  --dataset_root datasets/AutoBrep_Dataset --out_dir datasets/AutoBrep_Dataset/decode_shapes/exp1  --low_vram --use_ss_decoder --ss_target_res 64 --pool_on_cpu --decode_resolutions 1024 512 256 --decimate_faces 16777216 --dtype fp32
+python VAEdecoding.py  --dataset_root datasets/AutoBrep_Dataset --out_dir datasets/AutoBrep_Dataset/decode_shapes/subset_decoding \
+      --low_vram --use_ss_decoder --ss_target_res 64 --pool_on_cpu --decode_resolutions 1024 512 256 --decimate_faces 16777216 --dtype fp32
 """
 
 
@@ -191,7 +213,7 @@ def main() -> None:
 
     # Run Inference
     with torch.inference_mode(), autocast_ctx:
-        for res in [1024, 512, 256]:
+        for res in [512]:
             # Construct paths based on resolution
             ss_dir = (
                 args.dataset_root / "ss_latents" / f"ss_enc_conv3d_16l8_fp16_64_{res}"
@@ -215,150 +237,175 @@ def main() -> None:
             # Process files
             exp_combinations = generate_combinations_v3(ss_dir, shape_dir)
 
-            for (
-                key,
-                shape_path,
-                ss_path,
-            ) in exp_combinations:
-                torch.cuda.reset_peak_memory_stats()
+            for key, shape_path, ss_path in exp_combinations:
+                try:
+                    torch.cuda.reset_peak_memory_stats()
 
-                LOGGER.info(f"Processing: {key}")
+                    LOGGER.info(f"Processing: {key}")
 
-                # 1. Load latents (CPU)
-                feats_np, coords_np = load_shape_latent_npz(shape_path)
-                z_np = load_ss_latent_npz(ss_path) if args.use_ss_decoder else None
+                    # 1. Load latents (CPU)
+                    feats_np, coords_np = load_shape_latent_npz(shape_path)
+                    z_np = load_ss_latent_npz(ss_path) if args.use_ss_decoder else None
 
-                # 2. Move to GPU
-                feats = torch.from_numpy(feats_np).to(
-                    device=device, dtype=compute_dtype, non_blocking=True
-                )
-
-                enc_coords = torch.from_numpy(coords_np).to(
-                    device=device, dtype=torch.int32, non_blocking=True
-                )
-                enc_coords = add_batch_dim_if_missing(enc_coords)
-
-                LOGGER.info(
-                    f"Loaded latents: feats shape {feats.shape}, coords shape {enc_coords.shape}"
-                )
-
-                # 3. Optional: Decode Sparse Structure coords
-                if args.use_ss_decoder:
-                    LOGGER.info("Decoding sparse structure coordinates...")
-                    z_s = torch.from_numpy(z_np).to(
+                    # 2. Move to GPU
+                    feats = torch.from_numpy(feats_np).to(
                         device=device, dtype=compute_dtype, non_blocking=True
                     )
-                    LOGGER.info(f"Loaded latents: z_s shape {z_s.shape} ")
-                    if z_s.ndim == 4:
-                        z_s = z_s.unsqueeze(0)
 
-                    dec_coords, decoded = decode_sparse_structure_coords(
-                        decoder_slat,
-                        z_s,
-                        target_resolution=64,
-                        pool_on_cpu=args.pool_on_cpu,
+                    enc_coords = torch.from_numpy(coords_np).to(
+                        device=device, dtype=torch.int32, non_blocking=True
                     )
-                    dec_coords = dec_coords.to(device)
+                    enc_coords = add_batch_dim_if_missing(enc_coords)
 
-                    LOGGER.info(f"Decoded latents coords shape {dec_coords.shape}")
-                    coords = dec_coords
-                else:
-                    coords = enc_coords
+                    LOGGER.info(
+                        f"Loaded latents: feats shape {feats.shape}, coords shape {enc_coords.shape}"
+                    )
 
-                ## take intersection of dec_coords and enc_coords
-                # dec_coords_set = set(map(tuple, dec_coords.cpu().numpy()))
-                # enc_coords_set = set(map(tuple, enc_coords.cpu().numpy()))
-                # coords_torch = (
-                #     torch.from_numpy(np.array(list(dec_coords_set & enc_coords_set)))
-                #     .to(torch.int32)
-                #     .contiguous()
-                #     .to(device)
-                # )
-                ## update feats to match coords
-                # coord_to_index = {tuple(c.cpu().numpy()): i for i, c in enumerate(dec_coords)}
-                # indices = [coord_to_index[tuple(c.cpu().numpy())] for c in coords_torch]
-                # feats_temp = feats_temp[indices]
-                # feats_temp =  feats[indices]  # feats_temp
+                    # 3. Optional: Decode Sparse Structure coords
+                    if args.use_ss_decoder:
+                        LOGGER.info("Decoding sparse structure coordinates...")
+                        z_s = torch.from_numpy(z_np).to(
+                            device=device, dtype=compute_dtype, non_blocking=True
+                        )
+                        LOGGER.info(f"Loaded latents: z_s shape {z_s.shape} ")
+                        if z_s.ndim == 4:
+                            z_s = z_s.unsqueeze(0)
 
-                # for k in [10, 50, 100, 250, 500, 1500, 3000]:
-                # nn_idx, nn_dist = nearest_neighbor_kdtree(coords_torch, coords_torch, k=k)
-                # coords = coords_torch[nn_idx[:1]][0]
-                # feats = feats_temp[nn_idx[:1]][0]
+                        dec_coords, decoded = decode_sparse_structure_coords(
+                            decoder_slat,
+                            z_s,
+                            target_resolution=64,
+                            pool_on_cpu=args.pool_on_cpu,
+                        )
+                        dec_coords = dec_coords.to(device)
 
-                # ## NN features
-                # alpha = 0.0
-                # nn_idx, nn_dist = nearest_neighbor_kdtree(dec_coords, enc_coords)
-                # feats = feats[nn_idx] * alpha + feats_temp * (1.0 - alpha)
-                # coords = dec_coords
+                        LOGGER.info(f"Decoded latents coords shape {dec_coords.shape}")
+                        coords = dec_coords
+                    else:
+                        coords = enc_coords
 
-                # LOGGER.info(
-                #     f"After intersection, feats shape: {feats.shape}, coords shape: {coords.shape}"
-                # )
+                    ## take intersection of dec_coords and enc_coords
+                    # coords = (
+                    #     torch.from_numpy(
+                    #         np.array(
+                    #             list(
+                    #                 set(map(tuple, coords_np))
+                    #                 & set(map(tuple, _coords_np))
+                    #             )
+                    #         )
+                    #     )
+                    #     .to(torch.int32)
+                    #     .contiguous()
+                    #     .to(device)
+                    # )
+                    # coords = add_batch_dim_if_missing(coords)
+                    ## update feats to match coords
+                    # coord_to_index = {
+                    #     tuple(c.cpu().numpy()): i for i, c in enumerate(_enc_coords)
+                    # }
+                    # indices = [coord_to_index[tuple(c.cpu().numpy())] for c in coords]
+                    # feats = (
+                    #     _feats[indices]
+                    #     + (feats - _feats[indices])
+                    #     * torch.randn(feats.shape).to(feats.device)
+                    #     * 1.0
+                    # )
+                    # coords_np = coords.detach().cpu().numpy()
 
-                # export_voxels_as_cubes_mesh(
-                #     args.out_dir
-                #     / f"VOXELS_{key}_{res}{'_from_dec-coords.ply' if args.use_ss_decoder else '_from_enc-coords.ply'}",
-                #     coords,
-                #     voxel_size=1.0,
-                # )
+                    out_name = f"{key}_{res}" + (
+                        "_from_dec-coords"
+                        if args.use_ss_decoder
+                        else "_from_enc-coords"
+                    )
+                    out_path = args.out_dir / f"{out_name}"
 
-                out_name = f"{key}_{res}" + (
-                    "_from_dec-coords" if args.use_ss_decoder else "_from_enc-coords"
-                )
-                out_path = args.out_dir / f"{out_name}"
+                    # 4. Construct SparseTensor
 
-                # 4. Construct SparseTensor
-                shape_slat = SparseTensor(feats=feats, coords=coords)
-                LOGGER.info(
-                    f"Constructing SparseTensor with feats {feats.shape} and coords {coords.shape}"
-                )
+                    # chunks_idx = partition_voxels(
+                    #     coords_np[:, 1:], 50, 50, min_chunk_size=10
+                    # )
+                    # voxel_chucks = np.empty((0, 3), dtype=np.int32)
+                    # mesh_chucks = None
+                    combined_video = []
+                    fps = 32
+                    # for cid, chunk in enumerate(chunks_idx):
+                    # chunk = list(chunk)
+                    shape_slat = SparseTensor(feats=feats, coords=coords)
 
-                log_cuda_memory(f"{key}: before_decode")
+                    log_cuda_memory(f"{key}: before_decode")
 
-                # 5. Decode Meshes
-                meshes = decode_meshes_from_shape_slat(
-                    decoder_shape.cuda(),
-                    shape_slat,
-                    resolution=res,
-                    return_subs=False,
-                )
+                    # 5. Decode Meshes
+                    meshes = decode_meshes_from_shape_slat(
+                        decoder_shape.cuda(),
+                        shape_slat,
+                        resolution=res,
+                        return_subs=False,
+                    )
 
-                # 6. Post-processing
-                mesh = meshes[0]
-                mesh.fill_holes()
+                    # 6. Post-processing
+                    mesh = meshes[0]
+                    mesh.fill_holes()
 
-                if args.decimate_faces and args.decimate_faces > 0:
-                    mesh.simplify(args.decimate_faces)
+                    if args.decimate_faces and args.decimate_faces > 0:
+                        mesh.simplify(args.decimate_faces)
 
-                # 7. Export
-                v = mesh.vertices.detach().cpu().numpy().astype(np.float32)
-                f = mesh.faces.detach().cpu().numpy().astype(np.int32)
+                    # 7. Export
+                    # if mesh_chucks is None:
+                    #     mesh_chucks = mesh
+                    # else:
+                    #     offset = mesh_chucks.vertices.shape[0]
+                    #     mesh_chucks.vertices = torch.cat(
+                    #         [mesh_chucks.vertices, mesh.vertices], dim=0
+                    #     )
+                    #     mesh_chucks.faces = torch.cat(
+                    #         [
+                    #             mesh_chucks.faces,
+                    #             mesh.faces + offset,
+                    #         ],
+                    #         dim=0,
+                    #     )
 
-                # write_ply_binary(f"{out_path}.ply", v, f)
+                    # write_ply_binary(f"{out_path}.ply", v, f)
+                    # if cid == len(chunks_idx) - 1:
+                    #     fps += 24
 
-                trellis_video = render_utils.make_vis_frames(
-                    render_utils.render_video(mesh, num_frames=70)
-                )
-                imageio.mimsave(
-                    f"{out_path}.mp4",
-                    trellis_video,
-                    fps=15,
-                )
+                    trellis_video = render_utils.make_vis_frames(
+                        render_utils.render_video(mesh, num_frames=fps)
+                    )
 
-                img = render_voxels_pyvista(
-                    coords_np,
-                    surf_idx=np.arange(len(coords_np)),
-                    bound_idx=None,
-                    out_path=f"{out_path}.jpg",
-                )
+                    # voxel_chucks = np.vstack([voxel_chucks, coords_np[chunk][:, 1:]])
 
-                log_cuda_memory(f"{key}: after_export")
-                LOGGER.info(f"Wrote {out_path}")
+                    voxel_video = render_voxels_pyvista_video(
+                        coords_np[:, 1:],  # remove batch dim and feat dim
+                        surf_idx=np.arange(len(coords_np)),
+                        bound_idx=None,
+                        out_path=None,  # f"{out_path}.jpg"
+                        n_frames=fps,
+                    )
 
-                # 8. Cleanup to prevent VRAM accumulation
-                cleanup_cuda(shape_slat, feats, coords, meshes, mesh)
-                if args.use_ss_decoder:
-                    cleanup_cuda(z_s)
+                    combined_video.extend(
+                        [
+                            get_concat_h(voxel_video[vid], trellis_video[vid])
+                            for vid in range(len(trellis_video))
+                        ]
+                    )
+
+                    imageio.mimsave(
+                        f"{out_path}.mp4",
+                        combined_video,
+                        fps=12,
+                    )
+
+                    log_cuda_memory(f"{key}: after_export")
+                    LOGGER.info(f"Wrote {out_path}")
+
+                    # 8. Cleanup to prevent VRAM accumulation
+                    cleanup_cuda(shape_slat, feats, coords, meshes, mesh)
+                    if args.use_ss_decoder:
+                        cleanup_cuda(z_s)
+                except:
+                    # cleanup_cuda(shape_slat, feats, coords, meshes, mesh)
+                    pass
 
     LOGGER.info("Done.")
 
